@@ -1,0 +1,208 @@
+import streamlit as st
+import pandas as pd
+import folium
+from streamlit_folium import st_folium
+import requests
+import smtplib
+from email.mime.text import MIMEText
+from twilio.rest import Client
+
+# ----------------------------
+# 📩 EMAIL ALERT FUNCTION
+# ----------------------------
+def send_email_alert_func(to_email, subject, message):
+    sender_email = "your_email@gmail.com"
+    sender_password = "generated_app_password"  # Use the generated app password here
+
+
+    msg = MIMEText(message)
+    msg["Subject"] = subject
+    msg["From"] = sender_email
+    msg["To"] = to_email
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(sender_email, sender_password)
+            smtp.send_message(msg)
+        st.success("📧 Email alert sent successfully!")
+    except Exception as e:
+        st.error(f"❌ Failed to send email: {e}")
+
+# ----------------------------
+# 📱 SMS ALERT FUNCTION
+# ----------------------------
+def send_sms_alert_func(to_number, message):
+    account_sid = "your_twilio_sid"
+    auth_token = "your_twilio_auth_token"
+    from_number = "your_twilio_phone"
+
+    try:
+        client = Client(account_sid, auth_token)
+        client.messages.create(
+            body=message,
+            from_=from_number,
+            to=to_number
+        )
+        st.success("📱 SMS alert sent successfully!")
+    except Exception as e:
+        st.error(f"❌ Failed to send SMS: {e}")
+
+# ----------------------------
+# CITY COORDINATES
+# ----------------------------
+def get_city_coords():
+    return {
+        "Lahore": (31.5497, 74.3436),
+        "Karachi": (24.8607, 67.0011),
+        "Islamabad": (33.6844, 73.0479),
+        "Peshawar": (34.0151, 71.5249),
+        "Quetta": (30.1798, 66.9750)
+    }
+
+# ----------------------------
+# FETCH HOURLY FLOOD DATA
+# ----------------------------
+def fetch_flood_data(latitude, longitude, location_name):
+    url = (
+        f"https://api.open-meteo.com/v1/forecast"
+        f"?latitude={latitude}&longitude={longitude}"
+        f"&hourly=precipitation"
+    )
+    response = requests.get(url)
+    data = response.json()
+    df = pd.DataFrame({
+        'time': data['hourly']['time'],
+        'rainfall_mm': data['hourly']['precipitation']
+    })
+    df['date'] = pd.to_datetime(df['time']).dt.date
+    df['location'] = location_name
+    df['latitude'] = latitude
+    df['longitude'] = longitude
+    return df
+
+# ----------------------------
+# FETCH 7-DAY FORECAST
+# ----------------------------
+def fetch_weekly_forecast(latitude, longitude, high_threshold, medium_threshold):
+    url = (
+        f"https://api.open-meteo.com/v1/forecast"
+        f"?latitude={latitude}&longitude={longitude}"
+        f"&daily=precipitation_sum"
+        f"&timezone=auto"
+    )
+    response = requests.get(url)
+    data = response.json()
+    df = pd.DataFrame({
+        'date': data['daily']['time'],
+        'precipitation_sum_mm': data['daily']['precipitation_sum']
+    })
+    df['date'] = pd.to_datetime(df['date'])
+    df['risk_level'] = df['precipitation_sum_mm'].apply(
+        lambda x: 'High' if x > high_threshold else 'Medium' if x > medium_threshold else 'Low'
+    )
+    return df
+
+# ----------------------------
+# RISK LEVEL ASSIGNMENT
+# ----------------------------
+def assign_risk_level(df, high_threshold, medium_threshold):
+    df['risk_level'] = df['rainfall_mm'].apply(
+        lambda x: 'High' if x > high_threshold else 'Medium' if x > medium_threshold else 'Low'
+    )
+    return df
+
+# ----------------------------
+# CREATE MAP
+# ----------------------------
+def create_map(data):
+    m = folium.Map(location=[30.3753, 69.3451], zoom_start=5)
+    for _, row in data.iterrows():
+        folium.CircleMarker(
+            location=[row['latitude'], row['longitude']],
+            radius=5,
+            popup=f"{row['location']} - {row['risk_level']} Risk - {row['rainfall_mm']}mm",
+            color='red' if row['risk_level'] == 'High' else 'orange' if row['risk_level'] == 'Medium' else 'green',
+            fill=True,
+            fill_opacity=0.6
+        ).add_to(m)
+    return m
+
+# ----------------------------
+# SIDEBAR SETTINGS
+# ----------------------------
+st.sidebar.title("🔧 Settings")
+cities = get_city_coords()
+selected_city = st.sidebar.selectbox("Select City", list(cities.keys()))
+latitude, longitude = cities[selected_city]
+
+high_threshold = st.sidebar.slider("High Risk Threshold (mm)", 30, 100, 50)
+medium_threshold = st.sidebar.slider("Medium Risk Threshold (mm)", 10, high_threshold - 1, 20)
+
+# Alerts
+st.sidebar.title("📬 Alerts")
+send_email_alert = st.sidebar.checkbox("Send Email Alert")
+email_address = st.sidebar.text_input("Enter Email", placeholder="you@example.com") if send_email_alert else None
+
+send_sms_alert = st.sidebar.checkbox("Send SMS Alert")
+phone_number = st.sidebar.text_input("Enter Phone Number", placeholder="+923xxxxxxxxx") if send_sms_alert else None
+
+# ----------------------------
+# MAIN APP
+# ----------------------------
+st.title("Pakistan Flood Warning Dashboard")
+df = fetch_flood_data(latitude, longitude, selected_city)
+df = assign_risk_level(df, high_threshold, medium_threshold)
+
+# 🚨 Alerts
+high_risk_hours = (df['risk_level'] == 'High').sum()
+medium_risk_hours = (df['risk_level'] == 'Medium').sum()
+
+if high_risk_hours > 0:
+    st.error(f"🚨 Alert: {high_risk_hours} hours of high flood risk detected in {selected_city}!")
+    st.toast("⚠️ High flood risk! Stay safe!", icon="🚨")
+elif medium_risk_hours > 0:
+    st.warning(f"⚠️ Notice: {medium_risk_hours} hours of medium flood risk in {selected_city}.")
+    st.toast("🌧️ Moderate risk of flooding.", icon="⚠️")
+else:
+    st.success(f"✅ Low flood risk in {selected_city} at the moment.")
+    st.toast("✅ All clear — no significant flood risk.", icon="✅")
+
+# Send alerts
+alert_message = f"🚨 Flood Alert for {selected_city}!\nHigh risk hours detected: {high_risk_hours}\nStay safe and follow local advisories."
+if send_email_alert and email_address:
+    send_email_alert_func(email_address, "🚨 Flood Alert Notification", alert_message)
+if send_sms_alert and phone_number:
+    send_sms_alert_func(phone_number, alert_message)
+
+# Map
+st.subheader("📍 Flood Risk Map")
+m = create_map(df)
+st_folium(m)
+
+# Summary
+st.subheader("📊 Summary Statistics")
+st.metric("🌧️ Average Rainfall (mm)", f"{df['rainfall_mm'].mean():.2f}")
+st.metric("🌧️ Max Rainfall (mm)", f"{df['rainfall_mm'].max():.2f}")
+st.metric("⚠️ High Risk Hours", f"{high_risk_hours}")
+
+# Data Table
+st.subheader("📄 Data Table")
+st.dataframe(df)
+
+# Historical Trends
+st.subheader("Historical Trends")
+st.line_chart(df.groupby('date')['rainfall_mm'].mean())
+
+# Weekly Forecast
+st.subheader("🗓️ 7-Day Rainfall Forecast")
+
+weekly_df = fetch_weekly_forecast(latitude, longitude, high_threshold, medium_threshold)
+st.line_chart(weekly_df.set_index('date')['precipitation_sum_mm'])
+
+st.write("### 📅 Risk Level Per Day")
+for _, row in weekly_df.iterrows():
+    emoji = "🔴" if row['risk_level'] == 'High' else "🟠" if row['risk_level'] == 'Medium' else "🟢"
+    st.markdown(f"{emoji} **{row['date'].strftime('%A, %b %d')}** — {row['precipitation_sum_mm']} mm — **{row['risk_level']} Risk**")
+
+st.write("📋 Full Weekly Data")
+st.dataframe(weekly_df.rename(columns={'precipitation_sum_mm': 'Rainfall (mm)', 'risk_level': 'Risk Level'}))
