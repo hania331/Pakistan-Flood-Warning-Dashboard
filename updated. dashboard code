@@ -1,0 +1,341 @@
+import streamlit as st
+import pandas as pd
+import folium
+from streamlit_folium import st_folium
+import requests
+import smtplib
+from email.mime.text import MIMEText
+from twilio.rest import Client
+
+
+# ----------------------------
+# 📩 EMAIL ALERT FUNCTION
+# ----------------------------
+def send_email_alert_func(to_email, subject, message):
+    """
+    Sends an email alert using Gmail's SMTP server.
+    Uses st.secrets for secure credential management.
+    """
+    # Use st.secrets for credentials
+    try:
+        sender_email = st.secrets["email"]["sender_email"]
+        sender_password = st.secrets["email"]["sender_password"]
+    except KeyError:
+        st.error("❌ Email credentials not found. Please configure your `secrets.toml` file.")
+        return
+
+    if not to_email:
+        st.warning("⚠️ Email address not provided. Cannot send email alert.")
+        return
+
+    msg = MIMEText(message)
+    msg["Subject"] = subject
+    msg["From"] = sender_email
+    msg["To"] = to_email
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(sender_email, sender_password)
+            smtp.send_message(msg)
+        st.success(f"📧 Email alert sent successfully to {to_email}!")
+    except Exception as e:
+        st.error(f"❌ Failed to send email: {e}")
+
+
+# ----------------------------
+# 📱 SMS ALERT FUNCTION
+# ----------------------------
+def send_sms_alert_func(to_number, message):
+    """
+    Sends an SMS alert using Twilio's API.
+    Uses st.secrets for secure credential management.
+    """
+    # Use st.secrets for credentials
+    try:
+        account_sid = st.secrets["twilio"]["account_sid"]
+        auth_token = st.secrets["twilio"]["auth_token"]
+        from_number = st.secrets["twilio"]["from_number"]
+    except KeyError:
+        st.error("❌ Twilio credentials not found. Please configure your `secrets.toml` file.")
+        return
+
+    if not to_number:
+        st.warning("⚠️ Phone number not provided. Cannot send SMS alert.")
+        return
+
+    try:
+        client = Client(account_sid, auth_token)
+        client.messages.create(
+            body=message,
+            from_=from_number,
+            to=to_number
+        )
+        st.success(f"📱 SMS alert sent successfully to {to_number}!")
+    except Exception as e:
+        st.error(f"❌ Failed to send SMS: {e}")
+
+
+# ----------------------------
+# CITY COORDINATES
+# ----------------------------
+@st.cache_data
+def get_city_coords():
+    """Returns a dictionary of city coordinates."""
+    return {
+        "Lahore": (31.5497, 74.3436),
+        "Karachi": (24.8607, 67.0011),
+        "Islamabad": (33.6844, 73.0479),
+        "Quetta": (30.1798, 66.9750),
+        "Rawalpindi": (33.6261, 73.0714),
+        "Hyderabad": (25.3969, 68.3719),
+        "Thatta": (24.7474, 67.9239),
+        "Dadu": (26.7319, 67.7758),
+        "Jacobabad": (28.2819, 68.4382),
+        "Larkana": (27.5600, 68.2250),
+        "Sukkur": (27.7052, 68.8574),
+        "Faisalabad": (31.4180, 73.0790),
+        "Multan": (30.1984, 71.4687),
+        "Gujranwala": (32.1617, 74.1883),
+        "Sialkot": (32.4945, 74.5229),
+        "Dera Ghazi Khan": (30.0579, 70.6353),
+        "Rajanpur": (29.1041, 70.3290),
+        "Taunsa": (30.7011, 70.6511),
+        "Peshawar": (34.0151, 71.5249),
+        "Abbottabad": (34.1688, 73.2215),
+        "Mardan": (34.1981, 72.0406),
+        "Mingora": (34.7717, 72.3602),
+        "Dera Ismail Khan": (31.8333, 70.9083),
+        "Nowshera": (34.0185, 71.9783),
+        "Swat": (34.7458, 72.3572)
+    }
+
+
+# ----------------------------
+# FETCH HOURLY FLOOD DATA
+# ----------------------------
+@st.cache_data(ttl=3600)  # Cache data for 1 hour
+def fetch_flood_data(latitude, longitude, location_name):
+    """
+    Fetches hourly precipitation data from the Open-Meteo API.
+    Includes error handling for API requests.
+    """
+    url = (
+        f"https://api.open-meteo.com/v1/forecast"
+        f"?latitude={latitude}&longitude={longitude}"
+        f"&hourly=precipitation"
+    )
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
+        data = response.json()
+
+        # Validate that the expected keys are in the response
+        if 'hourly' not in data or 'time' not in data['hourly'] or 'precipitation' not in data['hourly']:
+            st.error("❌ Invalid data format received from the weather API for hourly forecast.")
+            return pd.DataFrame()
+
+        df = pd.DataFrame({
+            'time': data['hourly']['time'],
+            'rainfall_mm': data['hourly']['precipitation']
+        })
+        df['date'] = pd.to_datetime(df['time']).dt.date
+        df['location'] = location_name
+        df['latitude'] = latitude
+        df['longitude'] = longitude
+        return df
+
+    except requests.exceptions.RequestException as e:
+        st.error(f"❌ Failed to fetch weather data: {e}")
+        return pd.DataFrame()  # Return empty dataframe on error
+
+
+# ----------------------------
+# FETCH 7-DAY FORECAST
+# ----------------------------
+@st.cache_data(ttl=86400)  # Cache data for 24 hours
+def fetch_weekly_forecast(latitude, longitude, high_threshold, medium_threshold):
+    """
+    Fetches 7-day forecast data from Open-Meteo API.
+    Includes error handling.
+    """
+    url = (
+        f"https://api.open-meteo.com/v1/forecast"
+        f"?latitude={latitude}&longitude={longitude}"
+        f"&daily=precipitation_sum"
+        f"&timezone=auto"
+    )
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        if 'daily' not in data or 'time' not in data['daily'] or 'precipitation_sum' not in data['daily']:
+            st.error("❌ Invalid data format received from the weather API for weekly forecast.")
+            return pd.DataFrame()
+
+        df = pd.DataFrame({
+            'date': data['daily']['time'],
+            'precipitation_sum_mm': data['daily']['precipitation_sum']
+        })
+        df['date'] = pd.to_datetime(df['date'])
+        df['risk_level'] = df['precipitation_sum_mm'].apply(
+            lambda x: 'High' if x > high_threshold else 'Medium' if x > medium_threshold else 'Low'
+        )
+        return df
+
+    except requests.exceptions.RequestException as e:
+        st.error(f"❌ Failed to fetch weekly forecast data: {e}")
+        return pd.DataFrame()
+
+
+# ----------------------------
+# RISK LEVEL ASSIGNMENT
+# ----------------------------
+def assign_risk_level(df, high_threshold, medium_threshold):
+    """Assigns risk level based on rainfall amount."""
+    if 'rainfall_mm' not in df.columns:
+        return df  # Return original df if column is missing
+    df['risk_level'] = df['rainfall_mm'].apply(
+        lambda x: 'High' if x > high_threshold else 'Medium' if x > medium_threshold else 'Low'
+    )
+    return df
+
+
+# ----------------------------
+# CREATE MAP
+# ----------------------------
+def create_map(data):
+    """Creates a folium map with risk markers."""
+    m = folium.Map(location=[30.3753, 69.3451], zoom_start=5, tiles="CartoDB positron")
+    if not data.empty:
+        # Create a representative point for the city to display on the map
+        # We can use the first row's data for this
+        rep_point = data.iloc[[0]]
+        for _, row in rep_point.iterrows():
+            folium.CircleMarker(
+                location=[row['latitude'], row['longitude']],
+                radius=10,
+                popup=f"{row['location']} - Check sidebar for risk levels",
+                color='blue',
+                fill=True,
+                fill_opacity=0.6
+            ).add_to(m)
+    return m
+
+
+# ----------------------------
+# SIDEBAR SETTINGS
+# ----------------------------
+st.sidebar.title("🔧 Settings")
+cities = get_city_coords()
+selected_city = st.sidebar.selectbox("Select City", list(cities.keys()))
+latitude, longitude = cities[selected_city]
+
+high_threshold = st.sidebar.slider("High Risk Threshold (mm/hr)", 10, 100, 50, 5)
+medium_threshold = st.sidebar.slider("Medium Risk Threshold (mm/hr)", 1, high_threshold - 1, 20, 1)
+
+# Alerts
+st.sidebar.title("📬 Alerts Configuration")
+st.sidebar.info("Alerts are sent only when a 'High' risk is detected.")
+send_email_alert = st.sidebar.checkbox("Send Email Alert")
+email_address = st.sidebar.text_input("Enter Email", placeholder="you@example.com", disabled=not send_email_alert)
+
+send_sms_alert = st.sidebar.checkbox("Send SMS Alert")
+phone_number = st.sidebar.text_input("Enter Phone Number (E.164)", placeholder="+14155552671",
+                                     disabled=not send_sms_alert)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("""
+**How to set up secrets:** Create a file `.streamlit/secrets.toml` with your credentials:
+```toml
+# .streamlit/secrets.toml
+
+[email]
+sender_email = "your_email@gmail.com"
+sender_password = "your_gmail_app_password"
+
+[twilio]
+account_sid = "ACxxxxxxxxxxxxxxxxxxxxxxxx"
+auth_token = "your_twilio_auth_token"
+from_number = "+15017122661"
+```
+""")
+
+# ----------------------------
+# MAIN APP
+# ----------------------------
+st.title("🇵🇰 Pakistan Flood Warning Dashboard")
+
+# Fetch and process data
+df = fetch_flood_data(latitude, longitude, selected_city)
+
+if not df.empty:
+    df = assign_risk_level(df, high_threshold, medium_threshold)
+
+    # 🚨 Alerts
+    high_risk_hours = (df['risk_level'] == 'High').sum()
+    medium_risk_hours = (df['risk_level'] == 'Medium').sum()
+
+    if high_risk_hours > 0:
+        alert_message = f"🚨 Flood Alert for {selected_city}!\n{high_risk_hours} hour(s) of high flood risk detected.\nStay safe and follow local advisories."
+        st.error(alert_message)
+        st.toast(f"⚠️ High flood risk in {selected_city}!", icon="🚨")
+        # Send alerts only if high risk is detected
+        if send_email_alert and email_address:
+            send_email_alert_func(email_address, f"🚨 Flood Alert: {selected_city}", alert_message)
+        if send_sms_alert and phone_number:
+            send_sms_alert_func(phone_number, alert_message)
+
+    elif medium_risk_hours > 0:
+        st.warning(f"⚠️ Notice: {medium_risk_hours} hours of medium flood risk in {selected_city}.")
+        st.toast(f"🌧️ Moderate risk of flooding in {selected_city}.", icon="⚠️")
+    else:
+        st.success(f"✅ Low flood risk in {selected_city} for the next hours.")
+        st.toast("✅ All clear — no significant flood risk.", icon="✅")
+
+    # Map
+    st.subheader("📍 City Location Map")
+    m = create_map(df)
+    st_folium(m, width=725, height=500)
+
+    # Summary
+    st.subheader("📊 Hourly Forecast Summary")
+    avg_rainfall = df['rainfall_mm'].mean()
+    max_rainfall = df['rainfall_mm'].max()
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("🌧️ Avg Rainfall (mm/hr)", f"{avg_rainfall:.2f}")
+    col2.metric("🌧️ Max Rainfall (mm/hr)", f"{max_rainfall:.2f}")
+    col3.metric("⚠️ High Risk Hours", f"{high_risk_hours}")
+
+    # Data Table
+    st.subheader("📄 Hourly Forecast Data")
+    st.dataframe(df[['time', 'rainfall_mm', 'risk_level']].rename(columns={
+        'time': 'Time', 'rainfall_mm': 'Rainfall (mm/hr)', 'risk_level': 'Risk Level'
+    }))
+
+    # Historical Trends (using the fetched hourly data for the forecast period)
+    st.subheader("📈 Rainfall Trend (Next 7 Days)")
+    st.line_chart(df.set_index('time')['rainfall_mm'])
+
+else:
+    st.warning("Could not retrieve weather data. Please try again later.")
+
+# Weekly Forecast
+st.subheader("🗓️ 7-Day Precipitation Forecast")
+weekly_df = fetch_weekly_forecast(latitude, longitude, high_threshold * 24 * 0.5, medium_threshold * 24 * 0.5)
+
+if not weekly_df.empty:
+    st.bar_chart(weekly_df.set_index('date')['precipitation_sum_mm'])
+
+    st.write("#### 📅 Risk Level Per Day")
+    for _, row in weekly_df.iterrows():
+        emoji = "🔴" if row['risk_level'] == 'High' else "🟠" if row['risk_level'] == 'Medium' else "🟢"
+        st.markdown(
+            f"{emoji} **{row['date'].strftime('%A, %b %d')}**: {row['precipitation_sum_mm']:.2f} mm — **{row['risk_level']} Risk**")
+
+    st.write("#### 📋 Full Weekly Data")
+    st.dataframe(weekly_df.rename(
+        columns={'date': 'Date', 'precipitation_sum_mm': 'Total Daily Rainfall (mm)', 'risk_level': 'Risk Level'}))
+else:
+    st.warning("Could not retrieve 7-day forecast data.")
